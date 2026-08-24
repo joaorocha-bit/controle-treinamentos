@@ -20,6 +20,7 @@ from pathlib import Path
 
 import pandas as pd
 import plotly.express as px
+import requests
 import streamlit as st
 
 from data_parser import (
@@ -39,9 +40,27 @@ st.set_page_config(
     layout="wide",
 )
 
-DEFAULT_DATA_PATH = Path("data/planilha_treinamentos.xlsx")
 CONFIG_PATH = Path("data/layout_config.json")
 VALIDADE_DIAS = 365  # validade de 1 ano
+
+# --------------------------------------------------------------------------
+# Fonte de dados: Google Sheets (planilha pública, buscada automaticamente)
+# --------------------------------------------------------------------------
+GOOGLE_SHEET_ID = "1HQ9GRicZfVP_rUR51AxNpDaz_5GcZgAcBiP9qGkKZDk"
+GOOGLE_SHEET_GID = "1064660493"
+GOOGLE_SHEET_EXPORT_URL = (
+    f"https://docs.google.com/spreadsheets/d/{GOOGLE_SHEET_ID}/export"
+    f"?format=xlsx&gid={GOOGLE_SHEET_GID}"
+)
+
+
+@st.cache_data(show_spinner="Buscando planilha atualizada do Google Sheets...", ttl=300)
+def baixar_planilha_google(url: str) -> bytes:
+    """Baixa a planilha do Google Sheets como .xlsx (a planilha precisa estar
+    compartilhada como 'Qualquer pessoa com o link pode visualizar')."""
+    resposta = requests.get(url, timeout=30)
+    resposta.raise_for_status()
+    return resposta.content
 
 STATUS_CONCLUIDO = "Concluído"
 STATUS_REFORCO = "Necessita de reforço"
@@ -103,31 +122,32 @@ def ler_planilha(file_bytes: bytes, nome_aba: str | None, linha_max: int):
 st.sidebar.title("⚙️ Configurações")
 
 st.sidebar.subheader("📄 Fonte de dados")
-arquivo_upload = st.sidebar.file_uploader(
-    "Enviar planilha (.xlsx)", type=["xlsx"], help="Substitui o arquivo padrão do repositório apenas nesta sessão."
-)
+st.sidebar.caption("Planilha lida automaticamente do Google Sheets.")
 linha_max = st.sidebar.number_input(
     "Última linha com dados (planilha)", min_value=2, value=72, step=1,
     help="Número da linha do Excel (contando do topo) onde os dados terminam.",
 )
+if st.sidebar.button("🔄 Atualizar dados agora", use_container_width=True):
+    baixar_planilha_google.clear()
+    st.rerun()
 
 file_bytes = None
-if arquivo_upload is not None:
-    file_bytes = arquivo_upload.read()
-elif DEFAULT_DATA_PATH.exists():
-    file_bytes = DEFAULT_DATA_PATH.read_bytes()
+erro_download = None
+try:
+    file_bytes = baixar_planilha_google(GOOGLE_SHEET_EXPORT_URL)
+except Exception as e:
+    erro_download = str(e)
 
 if file_bytes is None:
     st.title("🚑 Controle de Treinamentos - Equipe de Transporte")
-    st.warning(
-        "Nenhuma planilha encontrada. Envie o arquivo pela barra lateral "
-        f"ou adicione-o em `{DEFAULT_DATA_PATH}` no repositório."
-    )
+    st.warning("Não foi possível carregar a planilha do Google Sheets.")
     st.info(
-        "Formato esperado: mesma disposição da planilha original — colunas "
-        "Matrícula e Nome, seguidas de pares Data/Status por módulo, e ao final "
-        "colunas de status único (ex.: Acompanhamento beira leito, Certificação, Situação)."
+        "Verifique se a planilha está compartilhada como **'Qualquer pessoa com "
+        "o link pode visualizar'** (Compartilhar → Acesso geral) e se o link/ID "
+        "e o GID configurados no código estão corretos."
     )
+    if erro_download:
+        st.caption(f"Detalhe técnico: {erro_download}")
     st.stop()
 
 df_bruto, aba_usada, abas_disponiveis = ler_planilha(file_bytes, st.session_state.config.get("aba"), linha_max)
