@@ -60,6 +60,15 @@ def baixar_planilha_google(url: str) -> bytes:
     compartilhada como 'Qualquer pessoa com o link pode visualizar')."""
     resposta = requests.get(url, timeout=30)
     resposta.raise_for_status()
+    
+    # Prevenção de erro: Se o Google retornar uma página HTML, a planilha está privada.
+    if resposta.content.startswith(b"<!DOCTYPE") or resposta.content.startswith(b"<html"):
+        raise ValueError(
+            "O link retornou a tela de login do Google. "
+            "Acesse sua planilha, clique em 'Compartilhar' e mude o acesso "
+            "para 'Qualquer pessoa com o link pode visualizar'."
+        )
+        
     return resposta.content
 
 STATUS_CONCLUIDO = "Concluído"
@@ -147,7 +156,7 @@ if file_bytes is None:
         "e o GID configurados no código estão corretos."
     )
     if erro_download:
-        st.caption(f"Detalhe técnico: {erro_download}")
+        st.error(f"Detalhe do erro: {erro_download}")
     st.stop()
 
 df_bruto, aba_usada, abas_disponiveis = ler_planilha(file_bytes, st.session_state.config.get("aba"), linha_max)
@@ -170,7 +179,7 @@ if not modulos and not unicos:
 
 df_long = montar_dataframe_longo(dados, col_matricula, col_nome, modulos, unicos)
 df_long = df_long[df_long["Nome"].notna()]
-df_long["Data"] = pd.to_datetime(df_long["Data"])
+df_long["Data"] = pd.to_datetime(df_long["Data"], errors='coerce')
 
 # --------------------------------------------------------------------------
 # Sidebar: nomes editáveis dos módulos
