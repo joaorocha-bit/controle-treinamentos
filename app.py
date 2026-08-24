@@ -180,8 +180,8 @@ st.sidebar.caption("Alguns rótulos vêm duplicados na planilha original (ex.: d
 nomes_editados = st.session_state.config.get("nomes_editados", {})
 with st.sidebar.expander("Editar rótulos", expanded=False):
     todos_labels = [m["label"] for m in modulos] + [u["label"] for u in unicos]
-    for label in todos_labels:
-        novo = st.text_input(label, value=nomes_editados.get(label, label), key=f"label_{label}")
+    for idx, label in enumerate(todos_labels):
+        novo = st.text_input(label, value=nomes_editados.get(label, label), key=f"label_{idx}_{label}")
         nomes_editados[label] = novo
 
 df_long["Treinamento"] = df_long["Treinamento"].map(lambda x: nomes_editados.get(x, x))
