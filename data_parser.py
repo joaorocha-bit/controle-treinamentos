@@ -283,4 +283,5 @@ def montar_dataframe_longo(dados: pd.DataFrame, col_matricula, col_nome, modulos
     df_long = pd.DataFrame(
         linhas, columns=["Matrícula", "Nome", "Treinamento", "Tipo", "Data", "Status"]
     )
+    df_long["Data"] = pd.to_datetime(df_long["Data"])
     return df_long
