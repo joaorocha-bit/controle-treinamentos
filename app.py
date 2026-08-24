@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """
 Dashboard de Controle de Treinamentos - Equipe de Transporte
-Layout Fixo: Linhas 10 e 11 (Cabeçalhos) | Linhas 12 a 72 (Dados)
+Layout Analisável por Abas: Módulo a Módulo (Quem Fez x Quem Não Fez)
 """
 
 import io
@@ -30,7 +30,7 @@ STATUS_COLORS = {
     STATUS_CONCLUIDO: "#2ecc71",
     STATUS_REFORCO: "#f1c40f",
     STATUS_PENDENTE: "#e74c3c",
-    "Sem dado": "#bdc3c7",
+    "Sem dado": "#95a5a6",
 }
 
 GOOGLE_SHEET_ID = "1HQ9GRicZfVP_rUR51AxNpDaz_5GcZgAcBiP9qGkKZDk"
@@ -86,11 +86,11 @@ def processar_planilha(file_bytes: bytes):
     excel = pd.ExcelFile(io.BytesIO(file_bytes))
     df_raw = pd.read_excel(excel, sheet_name=0, header=None, nrows=72)
 
-    # Linha 10 do Excel (Índice 9 no Python): Módulos/Grupos
+    # Linha 10 do Excel (Índice 9): Módulos
     group_header = df_raw.iloc[9].fillna("").astype(str).str.strip()
     group_header_ffill = group_header.replace("", None).ffill().fillna("")
 
-    # Linha 11 do Excel (Índice 10 no Python): Data / Status / Nome / Matrícula
+    # Linha 11 do Excel (Índice 10): Subcabeçalho
     sub_header = df_raw.iloc[10].fillna("").astype(str).str.strip()
 
     col_matricula = 0
@@ -190,7 +190,7 @@ def processar_planilha(file_bytes: bytes):
 
 
 # --------------------------------------------------------------------------
-# Carga de Dados
+# Carga e Filtros
 # --------------------------------------------------------------------------
 st.sidebar.title("🔍 Filtros de Busca")
 
@@ -204,170 +204,183 @@ try:
     df_long = processar_planilha(file_bytes)
 except Exception as e:
     st.title("🚑 Controle de Treinamentos - Equipe de Transporte")
-    st.error(f"Erro ao acessar a planilha: {e}")
+    st.error(f"Erro ao carregar a planilha: {e}")
     st.stop()
 
 if df_long.empty:
     st.title("🚑 Controle de Treinamentos - Equipe de Transporte")
-    st.warning("Nenhum registro de colaborador encontrado entre as linhas 12 e 72.")
+    st.warning("Nenhum colaborador encontrado entre as linhas 12 e 72.")
     st.stop()
 
-# Filtros simples na barra lateral
 filtro_nomes = st.sidebar.multiselect("Filtrar por Colaborador", sorted(df_long["Nome"].unique()))
-filtro_treinamentos = st.sidebar.multiselect("Filtrar por Módulo/Treinamento", sorted(df_long["Treinamento"].unique()))
 
 df = df_long.copy()
 if filtro_nomes:
     df = df[df["Nome"].isin(filtro_nomes)]
-if filtro_treinamentos:
-    df = df[df["Treinamento"].isin(filtro_treinamentos)]
 
-# --------------------------------------------------------------------------
-# Cálculos Globais
-# --------------------------------------------------------------------------
 hoje = pd.Timestamp(datetime.now().date())
 
-# Filtro de Validade (1 Ano / 365 dias)
-df_concluidos_com_data = df[(df["Status"] == STATUS_CONCLUIDO) & (df["Data"].notna())].copy()
-df_concluidos_com_data["Vencimento"] = df_concluidos_com_data["Data"] + pd.Timedelta(days=VALIDADE_DIAS)
-df_concluidos_com_data["Dias Restantes"] = (df_concluidos_com_data["Vencimento"] - hoje).dt.days
-
-df_concluidos_com_data["Situação Vencimento"] = df_concluidos_com_data["Dias Restantes"].apply(
-    lambda d: "Vencido" if d < 0 else ("A vencer (em até 60 dias)" if d <= 60 else "Dentro do prazo")
-)
-
-df_vencimento_alerta = df_concluidos_com_data[
-    df_concluidos_com_data["Situação Vencimento"].isin(["Vencido", "A vencer (em até 60 dias)"])
-].sort_values("Dias Restantes")
-
-# Resumo por Módulo (% Capacitação)
-resumo_modulo = df.groupby("Treinamento")["Status"].value_counts().unstack(fill_value=0)
-for c in [STATUS_CONCLUIDO, STATUS_REFORCO, STATUS_PENDENTE, "Sem dado"]:
-    if c not in resumo_modulo.columns:
-        resumo_modulo[c] = 0
-
-resumo_modulo["Total Colaboradores"] = resumo_modulo[[STATUS_CONCLUIDO, STATUS_REFORCO, STATUS_PENDENTE, "Sem dado"]].sum(axis=1)
-resumo_modulo["% Capacitado"] = (resumo_modulo[STATUS_CONCLUIDO] / resumo_modulo["Total Colaboradores"] * 100).round(1)
-tabela_capacitacao = resumo_modulo.reset_index().sort_values("% Capacitado", ascending=False)
-
 # --------------------------------------------------------------------------
-# PAINEL PRINCIPAL (LAYOUT FIXO)
+# PAINEL PRINCIPAL COM ABAS ANALISÁVEIS
 # --------------------------------------------------------------------------
 st.title("🚑 Controle de Treinamentos - Equipe de Transporte")
-st.caption(f"Dados extraídos estritamente das linhas 12 a 72 da planilha • Validade configurada: **1 ano (365 dias)**")
+st.caption("Extração estrita das Linhas 12 a 72 da planilha • Cabeçalhos das Linhas 10 e 11")
 
-# Resumo em métricas
-k1, k2, k3, k4 = st.columns(4)
-k1.metric("Total de Colaboradores", df["Nome"].nunique())
-k2.metric("Total de Módulos", df["Treinamento"].nunique())
-k3.metric("Treinamentos Concluídos", int((df["Status"] == STATUS_CONCLUIDO).sum()))
-k4.metric("Treinamentos a Vencer / Vencidos", len(df_vencimento_alerta))
-
-st.divider()
+tab_por_treino, tab_geral, tab_vencimentos, tab_matriz = st.tabs([
+    "📌 Análise por Treinamento (Quem Fez x Quem NÃO Fez)",
+    "📊 Visão Geral & % Capacitação",
+    "⏰ Vencimentos (Validade 1 Ano)",
+    "👤 Matriz Geral por Colaborador"
+])
 
 # ==========================================================================
-# VISÃO 1: TREINAMENTOS A VENCER (1 ANO DE VALIDADE)
+# ABA 1: QUEM FEZ X QUEM NÃO FEZ (DETALHADO POR TREINAMENTO)
 # ==========================================================================
-st.header("1. ⏰ Treinamentos a Vencer (Validade: 1 Ano)")
-st.write("Abaixo estão listados os treinamentos já realizados que estão **vencidos** ou **a vencer nos próximos 60 dias** (considerando o ciclo de 365 dias).")
+with tab_por_treino:
+    st.subheader("Análise Detalhada Módulo a Módulo")
+    lista_treinamentos = sorted(df["Treinamento"].unique().tolist())
 
-if df_vencimento_alerta.empty:
-    st.success("Nenhum treinamento vencido ou próximo do vencimento encontrado.")
-else:
-    df_exibicao_venc = df_vencimento_alerta[
-        ["Matrícula", "Nome", "Treinamento", "Data", "Vencimento", "Dias Restantes", "Situação Vencimento"]
-    ].copy()
-    df_exibicao_venc["Data"] = df_exibicao_venc["Data"].dt.strftime("%d/%m/%Y")
-    df_exibicao_venc["Vencimento"] = df_exibicao_venc["Vencimento"].dt.strftime("%d/%m/%Y")
-
-    col_tabela, col_grafico = st.columns([0.6, 0.4])
-    with col_tabela:
-        st.dataframe(df_exibicao_venc, use_container_width=True, hide_index=True)
-    with col_grafico:
-        fig_venc = px.bar(
-            df_vencimento_alerta.groupby(["Treinamento", "Situação Vencimento"]).size().reset_index(name="Quantidade"),
-            x="Treinamento", y="Quantidade", color="Situação Vencimento",
-            title="Alertas de Vencimento por Módulo",
-            color_discrete_map={"Vencido": "#e74c3c", "A vencer (em até 60 dias)": "#f39c12"}
+    if not lista_treinamentos:
+        st.info("Nenhum treinamento encontrado.")
+    else:
+        treino_selecionado = st.selectbox(
+            "👉 Selecione o Treinamento para analisar:",
+            lista_treinamentos
         )
-        st.plotly_chart(fig_venc, use_container_width=True)
 
-st.divider()
+        df_mod = df[df["Treinamento"] == treino_selecionado].copy()
+        
+        # Filtra Quem Fez x Quem Não Fez
+        df_fez = df_mod[df_mod["Status"] == STATUS_CONCLUIDO].copy()
+        df_nao_fez = df_mod[df_mod["Status"] != STATUS_CONCLUIDO].copy()
+
+        total_equipe = len(df_mod)
+        qtd_fez = len(df_fez)
+        qtd_nao_fez = len(df_nao_fez)
+        pct_fez = (qtd_fez / total_equipe * 100) if total_equipe > 0 else 0
+
+        # Métrica do Módulo
+        c1, c2, c3, c4 = st.columns(4)
+        c1.metric("Total de Colaboradores", total_equipe)
+        c2.metric("Concluíram (Quem Fez)", qtd_fez, f"{pct_fez:.1f}% da equipe")
+        c3.metric("Pendentes/Faltantes (Quem NÃO Fez)", qtd_nao_fez)
+        c4.metric("Status do Módulo", "Crítico" if pct_fez < 70 else ("Atenção" if pct_fez < 90 else "Ideal"))
+
+        st.divider()
+
+        col_left, col_right = st.columns(2)
+
+        # QUEM FEZ
+        with col_left:
+            st.success(f"🟢 **QUEM FEZ ({qtd_fez} colaboradores)**")
+            if df_fez.empty:
+                st.warning("Nenhum colaborador concluiu este treinamento ainda.")
+            else:
+                df_fez["Data Realização"] = df_fez["Data"].apply(lambda d: d.strftime("%d/%m/%Y") if pd.notna(d) else "Data N/A")
+                df_fez["Vencimento"] = df_fez["Data"].apply(lambda d: (d + pd.Timedelta(days=VALIDADE_DIAS)).strftime("%d/%m/%Y") if pd.notna(d) else "N/A")
+                df_fez["Dias Restantes"] = df_fez["Data"].apply(lambda d: (d + pd.Timedelta(days=VALIDADE_DIAS) - hoje).days if pd.notna(d) else "N/A")
+
+                st.dataframe(
+                    df_fez[["Matrícula", "Nome", "Data Realização", "Vencimento", "Dias Restantes"]],
+                    use_container_width=True, hide_index=True
+                )
+
+        # QUEM NÃO FEZ
+        with col_right:
+            st.error(f"🔴 **QUEM NÃO FEZ / PENDENTE ({qtd_nao_fez} colaboradores)**")
+            if df_nao_fez.empty:
+                st.balloons()
+                st.success("Toda a equipe concluiu este treinamento!")
+            else:
+                st.dataframe(
+                    df_nao_fez[["Matrícula", "Nome", "Status"]],
+                    use_container_width=True, hide_index=True
+                )
 
 # ==========================================================================
-# VISÃO 2: TREINAMENTOS REALIZADOS
+# ABA 2: VISÃO GERAL & % CAPACITAÇÃO
 # ==========================================================================
-st.header("2. ✅ Treinamentos Realizados")
-st.write("Visão geral dos treinamentos concluídos e comparativo da situação atual da equipe.")
+with tab_geral:
+    st.subheader("Evolução Global da Capacitação")
 
-col_realiz_1, col_realiz_2 = st.columns(2)
+    resumo_modulo = df.groupby("Treinamento")["Status"].value_counts().unstack(fill_value=0)
+    for c in [STATUS_CONCLUIDO, STATUS_REFORCO, STATUS_PENDENTE, "Sem dado"]:
+        if c not in resumo_modulo.columns:
+            resumo_modulo[c] = 0
 
-with col_realiz_1:
-    df_concluidos_qtd = (
-        df[df["Status"] == STATUS_CONCLUIDO]
-        .groupby("Treinamento").size().reset_index(name="Concluídos")
-        .sort_values("Concluídos", ascending=False)
-    )
-    fig_realiz = px.bar(
-        df_concluidos_qtd, x="Treinamento", y="Concluídos",
-        title="Total de Conclusões por Módulo",
-        text_auto=True, color_discrete_sequence=["#2ecc71"]
-    )
-    st.plotly_chart(fig_realiz, use_container_width=True)
+    resumo_modulo["Total"] = resumo_modulo[[STATUS_CONCLUIDO, STATUS_REFORCO, STATUS_PENDENTE, "Sem dado"]].sum(axis=1)
+    resumo_modulo["% Capacitado"] = (resumo_modulo[STATUS_CONCLUIDO] / resumo_modulo["Total"] * 100).round(1)
+    tabela_capacitacao = resumo_modulo.reset_index().sort_values("% Capacitado", ascending=False)
 
-with col_realiz_2:
-    df_distribuicao = df["Status"].value_counts().reset_index()
-    df_distribuicao.columns = ["Status", "Quantidade"]
-    fig_pie = px.pie(
-        df_distribuicao, names="Status", values="Quantidade",
-        title="Distribuição Geral dos Status de Treinamento",
-        color="Status", color_discrete_map=STATUS_COLORS
-    )
-    st.plotly_chart(fig_pie, use_container_width=True)
+    col_g1, col_g2 = st.columns([0.55, 0.45])
 
-st.divider()
+    with col_g1:
+        fig_cap = px.bar(
+            tabela_capacitacao, x="Treinamento", y="% Capacitado",
+            title="% da Equipe Capacitada por Módulo",
+            color="% Capacitado", color_continuous_scale="RdYlGn", range_color=[0, 100],
+            text_auto=".1f"
+        )
+        st.plotly_chart(fig_cap, use_container_width=True)
+
+    with col_g2:
+        st.markdown("**Resumo Numérico por Módulo**")
+        st.dataframe(
+            tabela_capacitacao[["Treinamento", STATUS_CONCLUIDO, STATUS_PENDENTE, STATUS_REFORCO, "Total", "% Capacitado"]],
+            use_container_width=True, hide_index=True
+        )
 
 # ==========================================================================
-# VISÃO 3: % DA EQUIPE CAPACITADA EM CADA MÓDULO
+# ABA 3: VENCIMENTOS (1 ANO)
 # ==========================================================================
-st.header("3. 📈 % da Equipe Capacitada por Módulo")
-st.write("Percentual de colaboradores que concluíram com sucesso cada um dos módulos.")
+with tab_vencimentos:
+    st.subheader("Acompanhamento de Validade dos Treinamentos (365 Dias)")
+    
+    df_concluidos_com_data = df[(df["Status"] == STATUS_CONCLUIDO) & (df["Data"].notna())].copy()
+    df_concluidos_com_data["Vencimento"] = df_concluidos_com_data["Data"] + pd.Timedelta(days=VALIDADE_DIAS)
+    df_concluidos_com_data["Dias Restantes"] = (df_concluidos_com_data["Vencimento"] - hoje).dt.days
 
-col_cap_1, col_cap_2 = st.columns([0.5, 0.5])
-
-with col_cap_1:
-    fig_cap = px.bar(
-        tabela_capacitacao, x="Treinamento", y="% Capacitado",
-        title="Percentual de Capacitação (%)",
-        color="% Capacitado", color_continuous_scale="RdYlGn", range_color=[0, 100],
-        text_auto=".1f"
+    df_concluidos_com_data["Situação Vencimento"] = df_concluidos_com_data["Dias Restantes"].apply(
+        lambda d: "Vencido" if d < 0 else ("A vencer (em até 60 dias)" if d <= 60 else "Dentro do prazo")
     )
-    st.plotly_chart(fig_cap, use_container_width=True)
 
-with col_cap_2:
+    df_vencidos_alertas = df_concluidos_com_data[
+        df_concluidos_com_data["Situação Vencimento"].isin(["Vencido", "A vencer (em até 60 dias)"])
+    ].sort_values("Dias Restantes")
+
+    if df_vencidos_alertas.empty:
+        st.success("Excelente! Nenhum treinamento realizado está vencido ou próximo do vencimento (60 dias).")
+    else:
+        df_exib_venc = df_vencidos_alertas[
+            ["Matrícula", "Nome", "Treinamento", "Data", "Vencimento", "Dias Restantes", "Situação Vencimento"]
+        ].copy()
+        df_exib_venc["Data"] = df_exib_venc["Data"].dt.strftime("%d/%m/%Y")
+        df_exib_venc["Vencimento"] = df_exib_venc["Vencimento"].dt.strftime("%d/%m/%Y")
+
+        st.warning(f"Existem **{len(df_vencidos_alertas)} registros** que necessitam de atenção para reciclagem.")
+        st.dataframe(df_exib_venc, use_container_width=True, hide_index=True)
+
+# ==========================================================================
+# ABA 4: MATRIZ GERAL POR COLABORADOR
+# ==========================================================================
+with tab_matriz:
+    st.subheader("Matriz de Status de Todos os Colaboradores")
+    
+    busca = st.text_input("🔎 Pesquisar colaborador por nome:")
+    
+    matriz_status = df.pivot_table(
+        index=["Matrícula", "Nome"], columns="Treinamento", values="Status", aggfunc="first"
+    ).reset_index()
+
+    if busca:
+        matriz_status = matriz_status[matriz_status["Nome"].str.contains(busca, case=False, na=False)]
+
+    def aplicar_cor_status(val):
+        cor = STATUS_COLORS.get(val, "")
+        return f"background-color: {cor}; color: white; font-weight: bold;" if cor else ""
+
+    cols_modulos = [c for c in matriz_status.columns if c not in ("Matrícula", "Nome")]
     st.dataframe(
-        tabela_capacitacao[["Treinamento", STATUS_CONCLUIDO, STATUS_PENDENTE, STATUS_REFORCO, "Total Colaboradores", "% Capacitado"]],
+        matriz_status.style.map(aplicar_cor_status, subset=cols_modulos),
         use_container_width=True, hide_index=True
     )
-
-st.divider()
-
-# ==========================================================================
-# VISÃO 4: STATUS DE CADA COLABORADOR POR TREINAMENTO
-# ==========================================================================
-st.header("4. 👤 Status de Cada Colaborador por Treinamento")
-st.write("Matriz de acompanhamento individual. Cada linha representa um colaborador e cada coluna um módulo de treinamento.")
-
-matriz_status = df.pivot_table(
-    index=["Matrícula", "Nome"], columns="Treinamento", values="Status", aggfunc="first"
-).reset_index()
-
-def aplicar_cor_status(val):
-    cor = STATUS_COLORS.get(val, "")
-    return f"background-color: {cor}; color: white; font-weight: bold;" if cor else ""
-
-cols_modulos = [c for c in matriz_status.columns if c not in ("Matrícula", "Nome")]
-st.dataframe(
-    matriz_status.style.map(aplicar_cor_status, subset=cols_modulos),
-    use_container_width=True, hide_index=True
-)
