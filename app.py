@@ -373,7 +373,7 @@ def render_status_colaborador():
 
     cols_status = [c for c in matriz.columns if c not in ("Matrícula", "Nome")]
     st.dataframe(
-        matriz.style.applymap(cor_status, subset=cols_status),
+        matriz.style.map(cor_status, subset=cols_status),
         use_container_width=True,
         hide_index=True,
     )
