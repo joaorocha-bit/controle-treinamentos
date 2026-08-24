@@ -211,7 +211,25 @@ def identificar_colunas(grupo: pd.Series, sub: pd.Series):
 
         i += 1
 
+    _deduplicar_labels(modulos, unicos)
+
     return col_matricula, col_nome, modulos, unicos
+
+
+def _deduplicar_labels(modulos, unicos):
+    """Garante rótulos únicos entre módulos e status únicos.
+
+    A planilha original pode ter blocos com o mesmo rótulo (ex.: dois
+    módulos chamados "M2"). Sem isso, eles se misturariam como se fossem
+    o mesmo treinamento e quebrariam widgets do Streamlit que usam o
+    rótulo como key. Ocorrências repetidas viram "M2", "M2 (2)", "M2 (3)"...
+    """
+    contagem = {}
+    for item in modulos + unicos:
+        original = item["label"]
+        contagem[original] = contagem.get(original, 0) + 1
+        if contagem[original] > 1:
+            item["label"] = f"{original} ({contagem[original]})"
 
 
 # --------------------------------------------------------------------------
