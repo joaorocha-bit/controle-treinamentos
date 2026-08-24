@@ -56,17 +56,21 @@ GOOGLE_SHEET_EXPORT_URL = (
 
 @st.cache_data(show_spinner="Buscando planilha atualizada do Google Sheets...", ttl=300)
 def baixar_planilha_google(url: str) -> bytes:
-    """Baixa a planilha do Google Sheets como .xlsx (a planilha precisa estar
-    compartilhada como 'Qualquer pessoa com o link pode visualizar')."""
-    resposta = requests.get(url, timeout=30)
+    """Baixa a planilha do Google Sheets como .xlsx disfarçando a requisição como um navegador."""
+    # O User-Agent evita que o Google bloqueie o script achando que é bot
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/115.0.0.0 Safari/537.36"
+    }
+    
+    resposta = requests.get(url, timeout=30, headers=headers)
     resposta.raise_for_status()
     
-    # Prevenção de erro: Se o Google retornar uma página HTML, a planilha está privada.
+    # Verifica se o Google retornou uma página HTML (login) em vez do arquivo Excel
     if resposta.content.startswith(b"<!DOCTYPE") or resposta.content.startswith(b"<html"):
         raise ValueError(
-            "O link retornou a tela de login do Google. "
-            "Acesse sua planilha, clique em 'Compartilhar' e mude o acesso "
-            "para 'Qualquer pessoa com o link pode visualizar'."
+            "O link retornou uma página da web em vez da planilha. "
+            "Isso geralmente significa que a planilha ainda não está acessível publicamente "
+            "ou que o ID da planilha está incorreto no código."
         )
         
     return resposta.content
@@ -136,8 +140,11 @@ linha_max = st.sidebar.number_input(
     "Última linha com dados (planilha)", min_value=2, value=72, step=1,
     help="Número da linha do Excel (contando do topo) onde os dados terminam.",
 )
+
+# Botão para limpar o cache e forçar um novo download
 if st.sidebar.button("🔄 Atualizar dados agora", use_container_width=True):
     baixar_planilha_google.clear()
+    ler_planilha.clear()
     st.rerun()
 
 file_bytes = None
@@ -150,16 +157,24 @@ except Exception as e:
 if file_bytes is None:
     st.title("🚑 Controle de Treinamentos - Equipe de Transporte")
     st.warning("Não foi possível carregar a planilha do Google Sheets.")
-    st.info(
-        "Verifique se a planilha está compartilhada como **'Qualquer pessoa com "
-        "o link pode visualizar'** (Compartilhar → Acesso geral) e se o link/ID "
-        "e o GID configurados no código estão corretos."
-    )
+    
     if erro_download:
-        st.error(f"Detalhe do erro: {erro_download}")
+        st.error(f"Detalhe técnico do erro: {erro_download}")
+        
+    st.info(
+        "Verifique duas coisas:\n"
+        "1. A planilha está como **'Qualquer pessoa com o link'** em Compartilhar > Acesso geral.\n"
+        "2. O ID da planilha (`1HQ9GRicZfVP_rUR51AxNpDaz_5GcZgAcBiP9qGkKZDk`) e o GID (`1064660493`) estão corretos."
+    )
     st.stop()
 
-df_bruto, aba_usada, abas_disponiveis = ler_planilha(file_bytes, st.session_state.config.get("aba"), linha_max)
+# Tenta fazer o parse usando a sua função `_ler_planilha`
+try:
+    df_bruto, aba_usada, abas_disponiveis = ler_planilha(file_bytes, st.session_state.config.get("aba"), linha_max)
+except Exception as e:
+    st.title("🚑 Controle de Treinamentos - Equipe de Transporte")
+    st.error(f"Erro ao ler a planilha com o `data_parser`: {str(e)}")
+    st.stop()
 
 aba_escolhida = st.sidebar.selectbox(
     "Aba da planilha", abas_disponiveis, index=abas_disponiveis.index(aba_usada)
@@ -167,8 +182,12 @@ aba_escolhida = st.sidebar.selectbox(
 if aba_escolhida != aba_usada:
     df_bruto, aba_usada, abas_disponiveis = ler_planilha(file_bytes, aba_escolhida, linha_max)
 
-grupo, sub, dados, dados_idx = parse_estrutura(df_bruto)
-col_matricula, col_nome, modulos, unicos = identificar_colunas(grupo, sub)
+try:
+    grupo, sub, dados, dados_idx = parse_estrutura(df_bruto)
+    col_matricula, col_nome, modulos, unicos = identificar_colunas(grupo, sub)
+except Exception as e:
+    st.error(f"Erro na estrutura da planilha (colunas/cabeçalhos): {str(e)}")
+    st.stop()
 
 if not modulos and not unicos:
     st.error(
