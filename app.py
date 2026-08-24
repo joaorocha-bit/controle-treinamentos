@@ -170,6 +170,7 @@ if not modulos and not unicos:
 
 df_long = montar_dataframe_longo(dados, col_matricula, col_nome, modulos, unicos)
 df_long = df_long[df_long["Nome"].notna()]
+df_long["Data"] = pd.to_datetime(df_long["Data"])
 
 # --------------------------------------------------------------------------
 # Sidebar: nomes editáveis dos módulos
@@ -250,6 +251,7 @@ df_modulos_apenas = df_filtrado[df_filtrado["Tipo"] == "Módulo"].copy()
 df_venc = df_modulos_apenas[
     (df_modulos_apenas["Status"] == STATUS_CONCLUIDO) & (df_modulos_apenas["Data"].notna())
 ].copy()
+df_venc["Data"] = pd.to_datetime(df_venc["Data"])
 hoje = pd.Timestamp(datetime.now().date())
 df_venc["Vencimento"] = df_venc["Data"] + pd.Timedelta(days=VALIDADE_DIAS)
 df_venc["Dias restantes"] = (df_venc["Vencimento"] - hoje).dt.days
