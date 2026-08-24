@@ -2,8 +2,7 @@
 """
 Dashboard de Controle de Treinamentos - Equipe de Transporte
 --------------------------------------------------------------
-Lê a planilha com detecção automática de células mescladas
-e pareamento de módulos por posição de coluna.
+Lê a planilha exatamente das linhas 10/11 (cabeçalhos) e 12 a 72 (dados).
 """
 
 import io
@@ -67,12 +66,26 @@ def baixar_planilha_google(url: str) -> bytes:
     return resposta.content
 
 
-def limpar_status(val):
+def extrair_data(val):
     if pd.isna(val) or val is None:
-        return "Sem dado"
+        return None
+    try:
+        dt = pd.to_datetime(val, dayfirst=True, errors="coerce")
+        if pd.notna(dt):
+            return dt
+    except Exception:
+        pass
+    return None
+
+
+def limpar_status(val, tem_data_valida=False):
+    # Se tiver data válida de conclusão e o status estiver em branco, assume Concluído
+    if pd.isna(val) or val is None:
+        return STATUS_CONCLUIDO if tem_data_valida else "Sem dado"
+    
     val_str = str(val).strip()
     if not val_str or val_str.lower() in ["nan", "none", "", "nat", "0"]:
-        return "Sem dado"
+        return STATUS_CONCLUIDO if tem_data_valida else "Sem dado"
     
     v_low = val_str.lower()
     if any(k in v_low for k in ["conclu", "ok", "realizad", "sim", "100%", "100", "c", "feito"]):
@@ -85,35 +98,36 @@ def limpar_status(val):
     return val_str
 
 
-@st.cache_data(show_spinner="Processando estrutura da planilha...")
-def processar_planilha_dinamica(file_bytes: bytes, nome_aba_req: str | None, linha_max: int):
+@st.cache_data(show_spinner="Lendo linhas da planilha...")
+def processar_planilha_fixa(
+    file_bytes: bytes,
+    nome_aba_req: str | None,
+    l_grupo_excel: int,
+    l_sub_excel: int,
+    l_ini_excel: int,
+    l_fim_excel: int,
+):
     excel = pd.ExcelFile(io.BytesIO(file_bytes))
     abas = excel.sheet_names
     aba_usada = nome_aba_req if (nome_aba_req and nome_aba_req in abas) else abas[0]
 
-    df_raw = pd.read_excel(excel, sheet_name=aba_usada, header=None, nrows=linha_max)
+    # Lê até a linha limite necessária
+    df_raw = pd.read_excel(excel, sheet_name=aba_usada, header=None, nrows=l_fim_excel)
 
-    # 1. Localizar a linha que contém "Nome" ou "Matrícula"
-    linha_sub = None
-    for i in range(min(35, len(df_raw))):
-        row_str = df_raw.iloc[i].fillna("").astype(str).str.lower().tolist()
-        if any("nome" in x or "matr" in x or "colaborador" in x or "func" in x for x in row_str):
-            linha_sub = i
-            break
+    # Conversão para índices 0-based do Python
+    idx_grupo = max(0, l_grupo_excel - 1)
+    idx_sub = max(0, l_sub_excel - 1)
+    idx_ini = max(0, l_ini_excel - 1)
+    idx_fim = l_fim_excel
 
-    if linha_sub is None:
-        linha_sub = 0
-
-    sub_header = df_raw.iloc[linha_sub].fillna("").astype(str).str.strip()
-
-    # Linha superior (Módulos/Grupos)
-    linha_grupo = max(0, linha_sub - 1)
-    group_header = df_raw.iloc[linha_grupo].fillna("").astype(str).str.strip()
-    
-    # Preenche horizontalmente células mescladas
+    # Linha 10 (Módulos/Grupos superior)
+    group_header = df_raw.iloc[idx_grupo].fillna("").astype(str).str.strip()
     group_header_ffill = group_header.replace("", None).ffill().fillna("")
 
-    # Identifica colunas de Matrícula e Nome
+    # Linha 11 (Subcabeçalho Data/Status/Nome/Matrícula)
+    sub_header = df_raw.iloc[idx_sub].fillna("").astype(str).str.strip()
+
+    # Identifica colunas Matrícula e Nome
     col_matricula = None
     col_nome = None
 
@@ -133,8 +147,10 @@ def processar_planilha_dinamica(file_bytes: bytes, nome_aba_req: str | None, lin
 
     if col_nome is None:
         col_nome = 1 if len(sub_header) > 1 else 0
+    if col_matricula is None and col_nome != 0:
+        col_matricula = 0
 
-    # Pareamento de Módulos
+    # Pareamento de Módulos (Data + Status)
     modulos = []
     unicos = []
     cols_usadas = set()
@@ -143,8 +159,8 @@ def processar_planilha_dinamica(file_bytes: bytes, nome_aba_req: str | None, lin
     if col_nome is not None:
         cols_usadas.add(col_nome)
 
-    i = 0
     n_cols = len(df_raw.columns)
+    i = 0
     while i < n_cols:
         if i in cols_usadas:
             i += 1
@@ -156,20 +172,20 @@ def processar_planilha_dinamica(file_bytes: bytes, nome_aba_req: str | None, lin
         gh_next = group_header_ffill.iloc[i + 1] if (i + 1 < len(group_header_ffill)) else ""
         sh_next = sub_header.iloc[i + 1] if (i + 1 < len(sub_header)) else ""
 
-        # Mesma designação de módulo cobrindo 2 colunas seguidas (célula mesclada)
         mesmo_grupo = (gh_curr != "" and gh_curr == gh_next)
 
-        # Ou subcabeçalho explícito de Data e Status
-        tem_data_status = (
-            ("data" in sh_curr.lower() or "dt" in sh_curr.lower()) and 
-            ("status" in sh_next.lower() or "situa" in sh_next.lower() or "conceito" in sh_next.lower())
-        ) or (
-            ("status" in sh_curr.lower() or "situa" in sh_curr.lower()) and 
-            ("data" in sh_next.lower() or "dt" in sh_next.lower())
-        )
+        sh_curr_low = sh_curr.lower()
+        sh_next_low = sh_next.lower()
 
-        if (mesmo_grupo or tem_data_status) and (i + 1 not in cols_usadas):
-            if "status" in sh_curr.lower():
+        is_data_1 = any(k in sh_curr_low for k in ["data", "dt", "realiza"])
+        is_status_1 = any(k in sh_curr_low for k in ["status", "situa", "conceito", "resultado"])
+        is_data_2 = any(k in sh_next_low for k in ["data", "dt", "realiza"])
+        is_status_2 = any(k in sh_next_low for k in ["status", "situa", "conceito", "resultado"])
+
+        tem_pareamento = (is_data_1 and is_status_2) or (is_status_1 and is_data_2)
+
+        if (mesmo_grupo or tem_pareamento) and (i + 1 < n_cols) and (i + 1 not in cols_usadas):
+            if is_status_1 or "status" in sh_curr_low:
                 c_st, c_dt = i, i + 1
             else:
                 c_dt, c_st = i, i + 1
@@ -182,61 +198,64 @@ def processar_planilha_dinamica(file_bytes: bytes, nome_aba_req: str | None, lin
             continue
 
         label = gh_curr if gh_curr else sh_curr
-        if label and label.lower() not in ["nan", "none", "unnamed"]:
+        if label and label.lower() not in ["nan", "none", "unnamed", ""]:
             unicos.append({"label": label, "col_status": i})
             cols_usadas.add(i)
 
         i += 1
 
-    # Extração de dados
-    df_dados = df_raw.iloc[linha_sub + 1:].reset_index(drop=True)
+    # Leitura estrita da linha 12 à 72 do Excel
+    df_dados = df_raw.iloc[idx_ini:idx_fim].reset_index(drop=True)
     registros = []
 
     for _, row in df_dados.iterrows():
-        nome = str(row[col_nome]).strip() if col_nome is not None and pd.notna(row[col_nome]) else ""
-        matr = str(row[col_matricula]).strip() if col_matricula is not None and pd.notna(row[col_matricula]) else ""
+        nome_raw = row[col_nome] if col_nome is not None and col_nome in row else None
+        matr_raw = row[col_matricula] if col_matricula is not None and col_matricula in row else None
+
+        nome = str(nome_raw).strip() if pd.notna(nome_raw) else ""
+        matr = str(matr_raw).strip() if pd.notna(matr_raw) else ""
 
         if not nome or nome.lower() in ["nan", "none", "0", "total", "subtotal", "nome"]:
             continue
 
         for m in modulos:
-            dt_v = row[m["col_data"]] if m["col_data"] in row else None
-            st_v = row[m["col_status"]] if m["col_status"] in row else None
-            
-            # Se inverteram data e status na planilha, tenta recuperar o valor
-            status_limpo = limpar_status(st_v)
-            if status_limpo == "Sem dado" and pd.notna(dt_v) and not isinstance(dt_v, (datetime, pd.Timestamp)):
-                status_limpo = limpar_status(dt_v)
+            dt_raw = row[m["col_data"]] if m["col_data"] in row else None
+            st_raw = row[m["col_status"]] if m["col_status"] in row else None
+
+            dt_parsed = extrair_data(dt_raw)
+            tem_data = (dt_parsed is not None)
+
+            status_limpo = limpar_status(st_raw, tem_data_valida=tem_data)
+
+            if status_limpo == "Sem dado" and pd.notna(dt_raw) and not tem_data:
+                status_limpo = limpar_status(dt_raw, tem_data_valida=False)
 
             registros.append({
                 "Matrícula": matr,
                 "Nome": nome,
                 "Treinamento": m["label"],
-                "Data": dt_v,
+                "Data": dt_parsed,
                 "Status": status_limpo,
                 "Tipo": "Módulo",
             })
 
         for u in unicos:
-            st_v = row[u["col_status"]] if u["col_status"] in row else None
+            st_raw = row[u["col_status"]] if u["col_status"] in row else None
             registros.append({
                 "Matrícula": matr,
                 "Nome": nome,
                 "Treinamento": u["label"],
                 "Data": None,
-                "Status": limpar_status(st_v),
+                "Status": limpar_status(st_raw, tem_data_valida=False),
                 "Tipo": "Único",
             })
 
     df_long = pd.DataFrame(registros)
-    if not df_long.empty and "Data" in df_long.columns:
-        df_long["Data"] = pd.to_datetime(df_long["Data"], errors="coerce")
-
-    return df_long, aba_usada, abas, linha_sub
+    return df_long, aba_usada, abas
 
 
 # --------------------------------------------------------------------------
-# Configuração / Sessão
+# Sessão / Configuração
 # --------------------------------------------------------------------------
 def carregar_config():
     if CONFIG_PATH.exists():
@@ -260,24 +279,28 @@ if "config" not in st.session_state:
     st.session_state.config = carregar_config()
 
 # --------------------------------------------------------------------------
-# Sidebar & Carregamento
+# Sidebar & Processamento
 # --------------------------------------------------------------------------
-st.sidebar.title("⚙️ Configurações")
-linha_max = st.sidebar.number_input("Última linha com dados", min_value=10, value=200, step=10)
+st.sidebar.title("⚙️ Mapeamento de Linhas")
 
-if st.sidebar.button("🔄 Atualizar dados agora", use_container_width=True):
+l_grupo = st.sidebar.number_input("Linha do Módulo (Excel)", min_value=1, value=10)
+l_sub = st.sidebar.number_input("Linha do Subcabeçalho (Excel)", min_value=1, value=11)
+l_ini = st.sidebar.number_input("Linha Inicial dos Dados (Excel)", min_value=1, value=12)
+l_fim = st.sidebar.number_input("Linha Final dos Dados (Excel)", min_value=1, value=72)
+
+if st.sidebar.button("🔄 Recarregar Planilha", use_container_width=True):
     baixar_planilha_google.clear()
-    processar_planilha_dinamica.clear()
+    processar_planilha_fixa.clear()
     st.rerun()
 
 try:
     file_bytes = baixar_planilha_google(GOOGLE_SHEET_EXPORT_URL)
-    df_long, aba_usada, abas_disponiveis, linha_hdr = processar_planilha_dinamica(
-        file_bytes, st.session_state.config.get("aba"), linha_max
+    df_long, aba_usada, abas_disponiveis = processar_planilha_fixa(
+        file_bytes, st.session_state.config.get("aba"), l_grupo, l_sub, l_ini, l_fim
     )
 except Exception as e:
     st.title("🚑 Controle de Treinamentos - Equipe de Transporte")
-    st.error(f"Erro ao ler planilha: {e}")
+    st.error(f"Erro ao carregar a planilha: {e}")
     st.stop()
 
 aba_escolhida = st.sidebar.selectbox(
@@ -285,11 +308,13 @@ aba_escolhida = st.sidebar.selectbox(
 )
 if aba_escolhida != aba_usada:
     st.session_state.config["aba"] = aba_escolhida
-    df_long, aba_usada, abas_disponiveis, linha_hdr = processar_planilha_dinamica(file_bytes, aba_escolhida, linha_max)
+    df_long, aba_usada, abas_disponiveis = processar_planilha_fixa(
+        file_bytes, aba_escolhida, l_grupo, l_sub, l_ini, l_fim
+    )
 
 if df_long.empty:
     st.title("🚑 Controle de Treinamentos - Equipe de Transporte")
-    st.warning("⚠️ Planilha lida, mas nenhum registro foi processado.")
+    st.warning(f"Nenhum registro encontrado entre as linhas {l_ini} e {l_fim} da aba '{aba_usada}'. Verifique a seleção das linhas na barra lateral.")
     st.stop()
 
 # --------------------------------------------------------------------------
@@ -359,10 +384,10 @@ resumo_modulo["Total"] = resumo_modulo[[STATUS_CONCLUIDO, STATUS_REFORCO, STATUS
 resumo_modulo["% Concluído"] = (resumo_modulo[STATUS_CONCLUIDO] / resumo_modulo["Total"] * 100).round(1)
 
 # --------------------------------------------------------------------------
-# Exibição Principal
+# Painel Principal
 # --------------------------------------------------------------------------
 st.title("🚑 Controle de Treinamentos - Equipe de Transporte")
-st.caption(f"Aba: **{aba_usada}** • Cabeçalho na linha {linha_hdr + 1} • {total_colaboradores} colaboradores carregados")
+st.caption(f"Aba: **{aba_usada}** • Linhas {l_ini} a {l_fim} • **{total_colaboradores} colaboradores carregados**")
 
 
 def render_indicadores_gerais():
