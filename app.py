@@ -2,13 +2,13 @@
 """
 Dashboard de Controle de Treinamentos - Equipe de Transporte
 --------------------------------------------------------------
-Lê a "Planilha Geral de Controle" com suporte a cabeçalhos mesclados
-e busca dinâmica de linha de dados.
+Lê a planilha com detecção automática de células mescladas
+e pareamento de módulos por posição de coluna.
 """
 
 import io
 import json
-from datetime import datetime, timedelta
+from datetime import datetime
 from pathlib import Path
 
 import pandas as pd
@@ -70,16 +70,19 @@ def baixar_planilha_google(url: str) -> bytes:
 def limpar_status(val):
     if pd.isna(val) or val is None:
         return "Sem dado"
-    val_str = str(val).strip().lower()
-    if not val_str or val_str == "nan":
+    val_str = str(val).strip()
+    if not val_str or val_str.lower() in ["nan", "none", "", "nat", "0"]:
         return "Sem dado"
-    if any(k in val_str for k in ["conclu", "ok", "realizad", "sim", "100"]):
+    
+    v_low = val_str.lower()
+    if any(k in v_low for k in ["conclu", "ok", "realizad", "sim", "100%", "100", "c", "feito"]):
         return STATUS_CONCLUIDO
-    if any(k in val_str for k in ["refor", "atenc", "atenç", "alerta"]):
+    if any(k in v_low for k in ["refor", "atenc", "atenç", "alerta", "r"]):
         return STATUS_REFORCO
-    if any(k in val_str for k in ["pend", "não", "nao", "falta", "a fazer"]):
+    if any(k in v_low for k in ["pend", "não", "nao", "falta", "a fazer", "p"]):
         return STATUS_PENDENTE
-    return str(val).strip()
+    
+    return val_str
 
 
 @st.cache_data(show_spinner="Processando estrutura da planilha...")
@@ -88,46 +91,50 @@ def processar_planilha_dinamica(file_bytes: bytes, nome_aba_req: str | None, lin
     abas = excel.sheet_names
     aba_usada = nome_aba_req if (nome_aba_req and nome_aba_req in abas) else abas[0]
 
-    # Lê sem cabeçalho inicial para inspecionar linha por linha
     df_raw = pd.read_excel(excel, sheet_name=aba_usada, header=None, nrows=linha_max)
 
-    # 1. Localizar dinamicamente a linha que contém "Nome" ou "Matrícula"
-    linha_header = None
-    for i in range(min(30, len(df_raw))):
+    # 1. Localizar a linha que contém "Nome" ou "Matrícula"
+    linha_sub = None
+    for i in range(min(35, len(df_raw))):
         row_str = df_raw.iloc[i].fillna("").astype(str).str.lower().tolist()
-        if any("nome" in x or "matr" in x or "colaborador" in x for x in row_str):
-            linha_header = i
+        if any("nome" in x or "matr" in x or "colaborador" in x or "func" in x for x in row_str):
+            linha_sub = i
             break
 
-    if linha_header is None:
-        linha_header = 0
+    if linha_sub is None:
+        linha_sub = 0
 
-    sub_header = df_raw.iloc[linha_header].fillna("").astype(str).str.strip()
+    sub_header = df_raw.iloc[linha_sub].fillna("").astype(str).str.strip()
 
-    # Linha dos Módulos (linha de cima com ffill para resolver células mescladas)
-    if linha_header > 0:
-        group_header = df_raw.iloc[linha_header - 1].ffill().fillna("").astype(str).str.strip()
-    else:
-        group_header = pd.Series([""] * len(sub_header))
+    # Linha superior (Módulos/Grupos)
+    linha_grupo = max(0, linha_sub - 1)
+    group_header = df_raw.iloc[linha_grupo].fillna("").astype(str).str.strip()
+    
+    # Preenche horizontalmente células mescladas
+    group_header_ffill = group_header.replace("", None).ffill().fillna("")
 
-    # Identify Colunas
+    # Identifica colunas de Matrícula e Nome
     col_matricula = None
     col_nome = None
 
     for idx, val in sub_header.items():
-        v_low = val.lower()
+        v_low = str(val).lower()
         if col_matricula is None and any(k in v_low for k in ["matr", "re", "código", "codigo", "id"]):
             col_matricula = idx
         if col_nome is None and any(k in v_low for k in ["nome", "colaborador", "funciona", "funcioná"]):
             col_nome = idx
 
     if col_nome is None:
-        for idx, val in sub_header.items():
-            if val:
+        for idx, val in group_header.items():
+            v_low = str(val).lower()
+            if any(k in v_low for k in ["nome", "colaborador"]):
                 col_nome = idx
                 break
 
-    # Identificar Módulos (Pares Data/Status) e Outros Status
+    if col_nome is None:
+        col_nome = 1 if len(sub_header) > 1 else 0
+
+    # Pareamento de Módulos
     modulos = []
     unicos = []
     cols_usadas = set()
@@ -137,62 +144,76 @@ def processar_planilha_dinamica(file_bytes: bytes, nome_aba_req: str | None, lin
         cols_usadas.add(col_nome)
 
     i = 0
-    n_cols = len(sub_header)
+    n_cols = len(df_raw.columns)
     while i < n_cols:
         if i in cols_usadas:
             i += 1
             continue
 
-        sh_val = sub_header.iloc[i]
-        gh_val = group_header.iloc[i] if i < len(group_header) else ""
+        gh_curr = group_header_ffill.iloc[i] if i < len(group_header_ffill) else ""
+        sh_curr = sub_header.iloc[i] if i < len(sub_header) else ""
 
-        # Verifica se forma um par Data e Status com a próxima coluna
-        if i + 1 < n_cols and (i + 1) not in cols_usadas:
-            sh_next = sub_header.iloc[i + 1]
+        gh_next = group_header_ffill.iloc[i + 1] if (i + 1 < len(group_header_ffill)) else ""
+        sh_next = sub_header.iloc[i + 1] if (i + 1 < len(sub_header)) else ""
 
-            is_data_1 = any(k in sh_val.lower() for k in ["data", "dt", "realiza"])
-            is_status_1 = any(k in sh_val.lower() for k in ["status", "situac", "situaç", "resultado", "conceito"])
-            is_data_2 = any(k in sh_next.lower() for k in ["data", "dt", "realiza"])
-            is_status_2 = any(k in sh_next.lower() for k in ["status", "situac", "situaç", "resultado", "conceito"])
+        # Mesma designação de módulo cobrindo 2 colunas seguidas (célula mesclada)
+        mesmo_grupo = (gh_curr != "" and gh_curr == gh_next)
 
-            if (is_data_1 and is_status_2) or (is_status_1 and is_data_2):
-                c_dt = i if is_data_1 else i + 1
-                c_st = i + 1 if is_data_1 else i
-                label = gh_val if (gh_val and gh_val != sh_val) else (sh_val if sh_val not in ["Data", "Status"] else f"Módulo {len(modulos)+1}")
+        # Ou subcabeçalho explícito de Data e Status
+        tem_data_status = (
+            ("data" in sh_curr.lower() or "dt" in sh_curr.lower()) and 
+            ("status" in sh_next.lower() or "situa" in sh_next.lower() or "conceito" in sh_next.lower())
+        ) or (
+            ("status" in sh_curr.lower() or "situa" in sh_curr.lower()) and 
+            ("data" in sh_next.lower() or "dt" in sh_next.lower())
+        )
 
-                modulos.append({"label": label, "col_data": c_dt, "col_status": c_st})
-                cols_usadas.add(i)
-                cols_usadas.add(i + 1)
-                i += 2
-                continue
+        if (mesmo_grupo or tem_data_status) and (i + 1 not in cols_usadas):
+            if "status" in sh_curr.lower():
+                c_st, c_dt = i, i + 1
+            else:
+                c_dt, c_st = i, i + 1
 
-        label_col = gh_val if gh_val else sh_val
-        if label_col and label_col.lower() not in ["nan", "none", "unnamed"]:
-            unicos.append({"label": label_col, "col_status": i})
+            label = gh_curr if gh_curr else (sh_curr if sh_curr not in ["Data", "Status", ""] else f"Módulo {len(modulos)+1}")
+            modulos.append({"label": label, "col_data": c_dt, "col_status": c_st})
+            cols_usadas.add(i)
+            cols_usadas.add(i + 1)
+            i += 2
+            continue
+
+        label = gh_curr if gh_curr else sh_curr
+        if label and label.lower() not in ["nan", "none", "unnamed"]:
+            unicos.append({"label": label, "col_status": i})
             cols_usadas.add(i)
 
         i += 1
 
-    # Construir registros das linhas de dados
-    df_dados = df_raw.iloc[linha_header + 1:].reset_index(drop=True)
+    # Extração de dados
+    df_dados = df_raw.iloc[linha_sub + 1:].reset_index(drop=True)
     registros = []
 
     for _, row in df_dados.iterrows():
         nome = str(row[col_nome]).strip() if col_nome is not None and pd.notna(row[col_nome]) else ""
         matr = str(row[col_matricula]).strip() if col_matricula is not None and pd.notna(row[col_matricula]) else ""
 
-        if not nome or nome.lower() in ["nan", "none", "0", "total", "subtotal"]:
+        if not nome or nome.lower() in ["nan", "none", "0", "total", "subtotal", "nome"]:
             continue
 
         for m in modulos:
             dt_v = row[m["col_data"]] if m["col_data"] in row else None
             st_v = row[m["col_status"]] if m["col_status"] in row else None
+            
+            # Se inverteram data e status na planilha, tenta recuperar o valor
+            status_limpo = limpar_status(st_v)
+            if status_limpo == "Sem dado" and pd.notna(dt_v) and not isinstance(dt_v, (datetime, pd.Timestamp)):
+                status_limpo = limpar_status(dt_v)
+
             registros.append({
                 "Matrícula": matr,
                 "Nome": nome,
                 "Treinamento": m["label"],
                 "Data": dt_v,
-                "Status": limpar_status(st_v),
+                "Status": status_limpo,
                 "Tipo": "Módulo",
             })
 
@@ -211,7 +232,7 @@ def processar_planilha_dinamica(file_bytes: bytes, nome_aba_req: str | None, lin
     if not df_long.empty and "Data" in df_long.columns:
         df_long["Data"] = pd.to_datetime(df_long["Data"], errors="coerce")
 
-    return df_long, aba_usada, abas, linha_header
+    return df_long, aba_usada, abas, linha_sub
 
 
 # --------------------------------------------------------------------------
@@ -268,8 +289,7 @@ if aba_escolhida != aba_usada:
 
 if df_long.empty:
     st.title("🚑 Controle de Treinamentos - Equipe de Transporte")
-    st.warning("⚠️ Planilha lida, mas nenhum registro de nome/colaborador foi processado.")
-    st.info(f"Cabeçalho detectado na linha Excel: **{linha_hdr + 1}**")
+    st.warning("⚠️ Planilha lida, mas nenhum registro foi processado.")
     st.stop()
 
 # --------------------------------------------------------------------------
@@ -342,7 +362,7 @@ resumo_modulo["% Concluído"] = (resumo_modulo[STATUS_CONCLUIDO] / resumo_modulo
 # Exibição Principal
 # --------------------------------------------------------------------------
 st.title("🚑 Controle de Treinamentos - Equipe de Transporte")
-st.caption(f"Aba: **{aba_usada}** • Cabeçalho localizado na linha {linha_hdr + 1} • {total_colaboradores} colaboradores encontrados")
+st.caption(f"Aba: **{aba_usada}** • Cabeçalho na linha {linha_hdr + 1} • {total_colaboradores} colaboradores carregados")
 
 
 def render_indicadores_gerais():
