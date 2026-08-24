@@ -57,21 +57,14 @@ GOOGLE_SHEET_EXPORT_URL = (
 @st.cache_data(show_spinner="Buscando planilha atualizada do Google Sheets...", ttl=300)
 def baixar_planilha_google(url: str) -> bytes:
     """Baixa a planilha do Google Sheets como .xlsx disfarçando a requisição como um navegador."""
-    # O User-Agent evita que o Google bloqueie o script achando que é bot
     headers = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/115.0.0.0 Safari/537.36"
     }
-    
     resposta = requests.get(url, timeout=30, headers=headers)
     resposta.raise_for_status()
     
-    # Verifica se o Google retornou uma página HTML (login) em vez do arquivo Excel
     if resposta.content.startswith(b"<!DOCTYPE") or resposta.content.startswith(b"<html"):
-        raise ValueError(
-            "O link retornou uma página da web em vez da planilha. "
-            "Isso geralmente significa que a planilha ainda não está acessível publicamente "
-            "ou que o ID da planilha está incorreto no código."
-        )
+        raise ValueError("O link retornou uma página HTML (login/permissão). Verifique o compartilhamento da planilha.")
         
     return resposta.content
 
@@ -137,11 +130,10 @@ st.sidebar.title("⚙️ Configurações")
 st.sidebar.subheader("📄 Fonte de dados")
 st.sidebar.caption("Planilha lida automaticamente do Google Sheets.")
 linha_max = st.sidebar.number_input(
-    "Última linha com dados (planilha)", min_value=2, value=72, step=1,
+    "Última linha com dados (planilha)", min_value=2, value=150, step=10,
     help="Número da linha do Excel (contando do topo) onde os dados terminam.",
 )
 
-# Botão para limpar o cache e forçar um novo download
 if st.sidebar.button("🔄 Atualizar dados agora", use_container_width=True):
     baixar_planilha_google.clear()
     ler_planilha.clear()
@@ -157,55 +149,62 @@ except Exception as e:
 if file_bytes is None:
     st.title("🚑 Controle de Treinamentos - Equipe de Transporte")
     st.warning("Não foi possível carregar a planilha do Google Sheets.")
-    
     if erro_download:
-        st.error(f"Detalhe técnico do erro: {erro_download}")
-        
-    st.info(
-        "Verifique duas coisas:\n"
-        "1. A planilha está como **'Qualquer pessoa com o link'** em Compartilhar > Acesso geral.\n"
-        "2. O ID da planilha (`1HQ9GRicZfVP_rUR51AxNpDaz_5GcZgAcBiP9qGkKZDk`) e o GID (`1064660493`) estão corretos."
-    )
+        st.error(f"Erro no download: {erro_download}")
     st.stop()
 
-# Tenta fazer o parse usando a sua função `_ler_planilha`
-try:
-    df_bruto, aba_usada, abas_disponiveis = ler_planilha(file_bytes, st.session_state.config.get("aba"), linha_max)
-except Exception as e:
-    st.title("🚑 Controle de Treinamentos - Equipe de Transporte")
-    st.error(f"Erro ao ler a planilha com o `data_parser`: {str(e)}")
-    st.stop()
+# Leitura bruta
+df_bruto, aba_usada, abas_disponiveis = ler_planilha(file_bytes, st.session_state.config.get("aba"), linha_max)
 
 aba_escolhida = st.sidebar.selectbox(
-    "Aba da planilha", abas_disponiveis, index=abas_disponiveis.index(aba_usada)
+    "Aba da planilha", abas_disponiveis, index=abas_disponiveis.index(aba_usada) if aba_usada in abas_disponiveis else 0
 )
 if aba_escolhida != aba_usada:
     df_bruto, aba_usada, abas_disponiveis = ler_planilha(file_bytes, aba_escolhida, linha_max)
 
-try:
-    grupo, sub, dados, dados_idx = parse_estrutura(df_bruto)
-    col_matricula, col_nome, modulos, unicos = identificar_colunas(grupo, sub)
-except Exception as e:
-    st.error(f"Erro na estrutura da planilha (colunas/cabeçalhos): {str(e)}")
-    st.stop()
-
-if not modulos and not unicos:
-    st.error(
-        "Não foi possível identificar as colunas de módulos/status automaticamente. "
-        "Verifique se a aba selecionada segue o layout esperado."
-    )
-    st.stop()
+# Parsing da estrutura
+grupo, sub, dados, dados_idx = parse_estrutura(df_bruto)
+col_matricula, col_nome, modulos, unicos = identificar_colunas(grupo, sub)
 
 df_long = montar_dataframe_longo(dados, col_matricula, col_nome, modulos, unicos)
-df_long = df_long[df_long["Nome"].notna()]
-df_long["Data"] = pd.to_datetime(df_long["Data"], errors='coerce')
+
+# Limpeza e remoção de registros sem nome
+if not df_long.empty and "Nome" in df_long.columns:
+    df_long = df_long[df_long["Nome"].notna() & (df_long["Nome"].astype(str).str.strip() != "")]
+    if "Data" in df_long.columns:
+        df_long["Data"] = pd.to_datetime(df_long["Data"], errors='coerce')
+
+# --------------------------------------------------------------------------
+# DIAGNÓSTICO (Caso a planilha venha vazia)
+# --------------------------------------------------------------------------
+if df_long.empty:
+    st.title("🚑 Controle de Treinamentos - Equipe de Transporte")
+    st.warning("⚠️ A planilha foi lida, mas **nenhum registro de colaborador foi encontrado**.")
+    
+    with st.expander("🔍 Inspecionar Diagnóstico dos Dados", expanded=True):
+        st.write(f"**Aba Selecionada:** `{aba_usada}`")
+        st.write(f"**Linhas lidas no DataFrame bruto:** {len(df_bruto)}")
+        st.write(f"**Coluna da Matrícula identificada:** `{col_matricula}`")
+        st.write(f"**Coluna do Nome identificada:** `{col_nome}`")
+        st.write(f"**Módulos encontrados ({len(modulos)}):** {[m['label'] for m in modulos]}")
+        st.write(f"**Status Únicos encontrados ({len(unicos)}):** {[u['label'] for u in unicos]}")
+        
+        st.markdown("---")
+        st.write("### Prévia dos Dados Brutos (Primeiras 15 linhas):")
+        st.dataframe(df_bruto.head(15), use_container_width=True)
+
+    st.info(
+        "💡 **Dicas para resolver:**\n"
+        "- Aumente o valor de **'Última linha com dados'** na barra lateral se os nomes estiverem mais abaixo.\n"
+        "- Verifique na barra lateral se a **'Aba da planilha'** correta está selecionada.\n"
+        "- Confirme se os nomes dos cabeçalhos na planilha bruta correspondem ao esperado pelo `data_parser.py`."
+    )
+    st.stop()
 
 # --------------------------------------------------------------------------
 # Sidebar: nomes editáveis dos módulos
 # --------------------------------------------------------------------------
 st.sidebar.subheader("✏️ Nomes exibidos dos treinamentos")
-st.sidebar.caption("Alguns rótulos vêm duplicados na planilha original (ex.: dois blocos 'M2'/'M3'). Renomeie aqui se quiser deixá-los mais claros.")
-
 nomes_editados = st.session_state.config.get("nomes_editados", {})
 with st.sidebar.expander("Editar rótulos", expanded=False):
     todos_labels = [m["label"] for m in modulos] + [u["label"] for u in unicos]
@@ -219,7 +218,7 @@ col1, col2 = st.sidebar.columns(2)
 if col1.button("💾 Salvar layout", use_container_width=True):
     st.session_state.config["nomes_editados"] = nomes_editados
     ok = salvar_config(st.session_state.config)
-    st.sidebar.success("Salvo!" if ok else "Salvo nesta sessão (disco não gravável neste ambiente).")
+    st.sidebar.success("Salvo!" if ok else "Salvo nesta sessão.")
 if col2.button("↩️ Restaurar padrão", use_container_width=True):
     st.session_state.config["nomes_editados"] = {}
     salvar_config(st.session_state.config)
@@ -249,37 +248,28 @@ if filtro_status:
     df_filtrado = df_filtrado[df_filtrado["Status"].isin(filtro_status)]
 
 # --------------------------------------------------------------------------
-# Sidebar: layout (seções exibidas, ordem e proporções)
+# Sidebar: layout
 # --------------------------------------------------------------------------
 st.sidebar.subheader("🧩 Layout do dashboard")
 secoes_ativas = st.sidebar.multiselect(
-    "Seções exibidas (a ordem escolhida define a ordem na página)",
+    "Seções exibidas",
     SECOES_PADRAO,
     default=st.session_state.config.get("secoes_ativas", SECOES_PADRAO),
 )
 n_col_kpi = st.sidebar.slider("Nº de colunas nos indicadores", 2, 5, st.session_state.config.get("n_col_kpi", 4))
 prop_grafico_esq = st.sidebar.slider(
-    "Proporção coluna esquerda (gráficos lado a lado)", 0.2, 0.8,
+    "Proporção coluna esquerda", 0.2, 0.8,
     float(st.session_state.config.get("prop_grafico_esq", 0.5)), 0.05,
 )
-
-if st.sidebar.button("💾 Salvar preferências de layout", use_container_width=True):
-    st.session_state.config.update(
-        {"secoes_ativas": secoes_ativas, "n_col_kpi": n_col_kpi, "prop_grafico_esq": prop_grafico_esq, "aba": aba_escolhida}
-    )
-    ok = salvar_config(st.session_state.config)
-    st.sidebar.success("Preferências salvas!" if ok else "Salvo nesta sessão.")
 
 # --------------------------------------------------------------------------
 # Cálculos
 # --------------------------------------------------------------------------
 df_modulos_apenas = df_filtrado[df_filtrado["Tipo"] == "Módulo"].copy()
 
-# Vencimento = Data de conclusão + 365 dias, apenas para status Concluído com data válida
 df_venc = df_modulos_apenas[
     (df_modulos_apenas["Status"] == STATUS_CONCLUIDO) & (df_modulos_apenas["Data"].notna())
 ].copy()
-df_venc["Data"] = pd.to_datetime(df_venc["Data"])
 hoje = pd.Timestamp(datetime.now().date())
 df_venc["Vencimento"] = df_venc["Data"] + pd.Timedelta(days=VALIDADE_DIAS)
 df_venc["Dias restantes"] = (df_venc["Vencimento"] - hoje).dt.days
@@ -290,7 +280,6 @@ df_a_vencer = df_venc[df_venc["Situação vencimento"].isin(["Vencido", "A vence
 
 total_colaboradores = df_long["Nome"].nunique()
 
-# % capacitação por módulo/treinamento (sobre o total de colaboradores)
 resumo_modulo = (
     df_filtrado.groupby("Treinamento")["Status"]
     .value_counts(normalize=False)
@@ -303,7 +292,7 @@ resumo_modulo["Total"] = resumo_modulo[[STATUS_CONCLUIDO, STATUS_REFORCO, STATUS
 resumo_modulo["% Concluído"] = (resumo_modulo[STATUS_CONCLUIDO] / resumo_modulo["Total"] * 100).round(1)
 
 # --------------------------------------------------------------------------
-# Cabeçalho
+# Cabeçalho e Renderização
 # --------------------------------------------------------------------------
 st.title("🚑 Controle de Treinamentos - Equipe de Transporte")
 st.caption(f"Fonte: aba **{aba_usada}** • {total_colaboradores} colaboradores • dados até a linha {linha_max}")
